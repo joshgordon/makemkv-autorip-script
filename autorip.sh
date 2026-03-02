@@ -7,6 +7,7 @@ CACHE="$(awk '/^cache/{print $1}' "$SCRIPTROOT/settings.cfg" | cut -d '=' -f2)"
 DEBUG="$(awk '/^debug/{print $1}' "$SCRIPTROOT/settings.cfg" | cut -d '=' -f2)"
 MINLENGTH="$(awk '/^minlength/{print $1}' "$SCRIPTROOT/settings.cfg" | cut -d '=' -f2)"
 OUTPUTDIR="$(awk '/^outputdir/' "$SCRIPTROOT/settings.cfg" | cut -d '=' -f2 | cut -f1 -d"#" | xargs)"
+SLACKWEBHOOK="$(awk '/^slackwebhook/' "$SCRIPTROOT/settings.cfg" | cut -d '=' -f2 | cut -f1 -d"#" | xargs)"
 ARGS=""
 
 # Check if the source drive has actually been set and is available
@@ -76,11 +77,35 @@ NOWDATE=$(date +"%F_%H-%M-%S")
 DISKTITLE="${DISKTITLERAW}_-_$NOWDATE"
 
 
+if [ -n "$SLACKWEBHOOK" ]; then
+	curl -s -o /dev/null -X POST -H 'Content-type: application/json' \
+		--data "{\"text\":\"Starting rip of *${DISKTITLERAW}* on \`${SOURCEDRIVE}\`\"}" \
+		"$SLACKWEBHOOK"
+fi
 mkdir "$OUTPUTDIR/$DISKTITLE"
 makemkvcon mkv --messages="${SCRIPTROOT}/logs/${NOWDATE}_$DISKTITLERAW.log" --noscan --robot $ARGS disc:"$SOURCEMMKVDRIVE" all "${OUTPUTDIR}/${DISKTITLE}"
-if [ $? -le 1 ]; then
-	echo "[INFO] $SOURCEDRIVE: Ripping finished (exit code $?), ejecting"
+RIPRESULT=$?
+if [ $RIPRESULT -le 1 ]; then
+	echo "[INFO] $SOURCEDRIVE: Ripping finished (exit code $RIPRESULT), ejecting"
+	SLACK_MSG="Ripping finished for *${DISKTITLERAW}* on \`${SOURCEDRIVE}\` (exit code ${RIPRESULT})"
 else
-	echo "[ERROR] $SOURCEDRIVE: RIPPING FAILED (exit code $?), ejecting. Please check the logs under ${SCRIPTROOT}/logs/${NOWDATE}_${DISKTITLERAW}.log"
+	echo "[ERROR] $SOURCEDRIVE: RIPPING FAILED (exit code $RIPRESULT), ejecting. Please check the logs under ${SCRIPTROOT}/logs/${NOWDATE}_${DISKTITLERAW}.log"
+	SLACK_MSG=":x: Ripping FAILED for *${DISKTITLERAW}* on \`${SOURCEDRIVE}\` (exit code ${RIPRESULT}). Check logs: \`${SCRIPTROOT}/logs/${NOWDATE}_${DISKTITLERAW}.log\`"
+fi
+if [ -n "$SLACKWEBHOOK" ]; then
+	curl -s -o /dev/null -X POST -H 'Content-type: application/json' \
+		--data "{\"text\":\"${SLACK_MSG}\"}" \
+		"$SLACKWEBHOOK"
+	if [ $RIPRESULT -gt 1 ] && [ -f "${SCRIPTROOT}/logs/${NOWDATE}_${DISKTITLERAW}.log" ]; then
+		SLACK_LOG_PAYLOAD=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    content = ''.join(f.readlines()[-50:])
+print(json.dumps({'text': '\`\`\`' + content + '\`\`\`'}))
+" "${SCRIPTROOT}/logs/${NOWDATE}_${DISKTITLERAW}.log")
+		curl -s -o /dev/null -X POST -H 'Content-type: application/json' \
+			--data "$SLACK_LOG_PAYLOAD" \
+			"$SLACKWEBHOOK"
+	fi
 fi
 eject "$SOURCEDRIVE"

@@ -1,11 +1,12 @@
 #!/bin/bash
-if [ "$USER" != root ] && [ "$SUDO_USER" != root ]; then
-	echo "This script needs to be executed with sudo!"
-	exit 1
-fi
+# if [ "$USER" != root ] && [ "$SUDO_USER" != root ]; then
+# 	echo "This script needs to be executed with sudo!"
+# 	exit 1
+# fi
 
 scriptroot=$(dirname "$(realpath "$0")")
 userhome=$(eval echo ~"${SUDO_USER:-$USER}")
+slackwebhook="$(awk '/^slackwebhook/' "$scriptroot/settings.cfg" | cut -d '=' -f2 | cut -f1 -d"#" | xargs)"
 
 
 # Update license key from settings.cfg to ~/.MakeMKV/settings.conf MANUALLY
@@ -25,6 +26,12 @@ echo "----------------------------"
 printf "Found the following devices:\n"
 printf '%s\n' "${drives[@]}"
 echo "----------------------------"
+if [ -n "$slackwebhook" ]; then
+	drives_list=$(printf '`%s` ' "${drives[@]}")
+	curl -s -o /dev/null -X POST -H 'Content-type: application/json' \
+		--data "{\"text\":\"AutoRip started on \`$(hostname)\`. Monitoring drives: ${drives_list}\"}" \
+		"$slackwebhook"
+fi
 
 # Eject all drives to indicate startup
 for drive in "${drives[@]}"; do eject "$drive" & done
