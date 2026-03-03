@@ -7,6 +7,7 @@
 scriptroot=$(dirname "$(realpath "$0")")
 userhome=$(eval echo ~"${SUDO_USER:-$USER}")
 slackwebhook="$(awk '/^slackwebhook/' "$scriptroot/settings.cfg" | cut -d '=' -f2 | cut -f1 -d"#" | xargs)"
+serialrip="$(awk '/^serialrip/' "$scriptroot/settings.cfg" | cut -d '=' -f2 | cut -f1 -d"#" | xargs)"
 
 
 # Update license key from settings.cfg to ~/.MakeMKV/settings.conf MANUALLY
@@ -48,7 +49,11 @@ discstatus () {
 				echo "[INFO] $drive: disc is ready" >&2;
 				unset repeatnodisc;
 				unset repeatemptydisc;
-				/bin/bash "$scriptroot/autorip.sh" "$drive";
+				if [ "$serialrip" = "true" ]; then
+					flock "$scriptroot/autorip.lock" /bin/bash "$scriptroot/autorip.sh" "$drive";
+				else
+					/bin/bash "$scriptroot/autorip.sh" "$drive";
+				fi
 				sleep 10;
 				;;
 			# What to do when the disc is found, but not yet ready
