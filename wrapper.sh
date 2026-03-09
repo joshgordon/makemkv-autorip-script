@@ -8,6 +8,7 @@ scriptroot=$(dirname "$(realpath "$0")")
 userhome=$(eval echo ~"${SUDO_USER:-$USER}")
 slackwebhook="$(awk '/^slackwebhook/' "$scriptroot/settings.cfg" | cut -d '=' -f2 | cut -f1 -d"#" | xargs)"
 webport="$(awk '/^webport/{print $1}' "$scriptroot/settings.cfg" | cut -d '=' -f2 | cut -f1 -d"#" | xargs)"
+autoeject="$(awk '/^autoeject/{print $1}' "$scriptroot/settings.cfg" | cut -d '=' -f2 | cut -f1 -d"#" | xargs)"
 webport="${webport:-8080}"
 
 
@@ -41,7 +42,9 @@ if [ -n "$slackwebhook" ]; then
 fi
 
 # Eject all drives to indicate startup
-# for drive in "${drives[@]}"; do eject "$drive" & done
+if [ "$autoeject" == "true" ]; then
+	for drive in "${drives[@]}"; do eject "$drive" & done
+fi
 
 # Create template for forking
 discstatus () {
@@ -56,7 +59,6 @@ discstatus () {
 				unset repeatnodisc;
 				unset repeatemptydisc;
 				/bin/bash "$scriptroot/autorip.sh" "$drive";
-				fi
 				sleep 10;
 				;;
 			# What to do when the disc is found, but not yet ready
