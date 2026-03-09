@@ -8,6 +8,8 @@ DEBUG="$(awk '/^debug/{print $1}' "$SCRIPTROOT/settings.cfg" | cut -d '=' -f2)"
 MINLENGTH="$(awk '/^minlength/{print $1}' "$SCRIPTROOT/settings.cfg" | cut -d '=' -f2)"
 OUTPUTDIR="$(awk '/^outputdir/' "$SCRIPTROOT/settings.cfg" | cut -d '=' -f2 | cut -f1 -d"#" | xargs)"
 SLACKWEBHOOK="$(awk '/^slackwebhook/' "$SCRIPTROOT/settings.cfg" | cut -d '=' -f2 | cut -f1 -d"#" | xargs)"
+WEBPORT="$(awk '/^webport/{print $1}' "$SCRIPTROOT/settings.cfg" | cut -d '=' -f2 | cut -f1 -d"#" | xargs)"
+WEBPORT="${WEBPORT:-8080}"
 ARGS=""
 
 # Check if the source drive has actually been set and is available
@@ -75,6 +77,8 @@ DISKTITLERAW=$(blkid -o value -s LABEL "$SOURCEDRIVE")
 DISKTITLERAW=${DISKTITLERAW// /_}
 NOWDATE=$(date +"%F_%H-%M-%S")
 DISKTITLE="${DISKTITLERAW}_-_$NOWDATE"
+STATUSFILE="${SCRIPTROOT}/logs/status_$(basename $SOURCEDRIVE).json"
+PROGRESSFILE="${SCRIPTROOT}/logs/${NOWDATE}_${DISKTITLERAW}_progress.log"
 
 
 if [ -n "$SLACKWEBHOOK" ]; then
@@ -82,9 +86,31 @@ if [ -n "$SLACKWEBHOOK" ]; then
 		--data "{\"text\":\"Starting rip of *${DISKTITLERAW}* on \`${SOURCEDRIVE}\`\"}" \
 		"$SLACKWEBHOOK"
 fi
+python3 -c "
+import json
+with open('$STATUSFILE', 'w') as f:
+    json.dump({
+        'drive': '$SOURCEDRIVE',
+        'title': '$DISKTITLERAW',
+        'start_time': '$(date -Iseconds)',
+        'status': 'ripping',
+        'log_file': '${NOWDATE}_${DISKTITLERAW}.log',
+        'progress_file': '${NOWDATE}_${DISKTITLERAW}_progress.log'
+    }, f)
+"
 mkdir "$OUTPUTDIR/$DISKTITLE"
-makemkvcon mkv --messages="${SCRIPTROOT}/logs/${NOWDATE}_$DISKTITLERAW.log" --noscan --robot $ARGS disc:"$SOURCEMMKVDRIVE" all "${OUTPUTDIR}/${DISKTITLE}"
+makemkvcon mkv --messages="${SCRIPTROOT}/logs/${NOWDATE}_$DISKTITLERAW.log" --progress="$PROGRESSFILE" --noscan --robot $ARGS disc:"$SOURCEMMKVDRIVE" all "${OUTPUTDIR}/${DISKTITLE}"
 RIPRESULT=$?
+STATUS="complete"
+[ $RIPRESULT -gt 1 ] && STATUS="failed"
+python3 -c "
+import json
+with open('$STATUSFILE') as f:
+    d = json.load(f)
+d.update({'status': '$STATUS', 'exit_code': $RIPRESULT, 'end_time': '$(date -Iseconds)'})
+with open('$STATUSFILE', 'w') as f:
+    json.dump(d, f)
+"
 if [ $RIPRESULT -le 1 ]; then
 	echo "[INFO] $SOURCEDRIVE: Ripping finished (exit code $RIPRESULT), ejecting"
 	SLACK_MSG="Ripping finished for *${DISKTITLERAW}* on \`${SOURCEDRIVE}\` (exit code ${RIPRESULT})"
