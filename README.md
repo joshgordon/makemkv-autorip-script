@@ -27,6 +27,16 @@ Then, just run the wrapper and you're good to go: `bash wrapper.sh`
 
 Happy ripping!
 
+# Web Status Dashboard
+The wrapper starts a live status dashboard at `http://<hostname>:<webport>` (default port 8080), configurable via `webport` in `settings.cfg`.
+
+It shows active rips with per-title and overall progress bars, which title number is being saved out of how many total, current operation, elapsed time, and a history of recent completions. Updates are pushed in real time over a WebSocket.
+
+**Required packages:**
+```
+apt install python3-fastapi uvicorn
+```
+
 # Note
 If you just want to rip a single disc with your predefined settings, you can call the autorip.sh-script directly, by passing the drive's location as an argument: `bash autorip.sh /dev/sr0`.
 This will rip the disc the same way as with the wrapper, but just once, without all the sweet automation.
