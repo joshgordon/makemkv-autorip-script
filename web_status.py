@@ -4,11 +4,13 @@
 import asyncio
 import json
 import re
+import shutil
+import subprocess
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
 SCRIPT_DIR = Path(__file__).parent
@@ -18,16 +20,37 @@ SETTINGS_FILE = SCRIPT_DIR / "settings.cfg"
 connected: set[WebSocket] = set()
 
 
-def read_webport():
+def read_setting(key):
     try:
         for line in SETTINGS_FILE.read_text().splitlines():
-            if line.startswith("webport"):
-                val = line.split("=", 1)[1].split("#")[0].strip()
-                if val.isdigit():
-                    return int(val)
+            if line.startswith(key):
+                val = line.split("=", 1)[1].split("#")[0].strip().strip('"')
+                return val
     except Exception:
         pass
+    return None
+
+
+def read_webport():
+    val = read_setting("webport")
+    if val and val.isdigit():
+        return int(val)
     return 8080
+
+
+def get_disk_usage():
+    path = read_setting("outputdir") or "/"
+    try:
+        usage = shutil.disk_usage(path)
+        return {
+            "path": path,
+            "total": usage.total,
+            "used": usage.used,
+            "free": usage.free,
+            "pct_used": round(usage.used / usage.total * 100, 1),
+        }
+    except Exception:
+        return None
 
 
 def parse_progress(progress_file_path):
@@ -88,7 +111,7 @@ def get_status_data():
     history = []
 
     if not LOGS_DIR.exists():
-        return {"active": active, "history": history}
+        return {"active": active, "history": history, "disk": get_disk_usage()}
 
     for f in LOGS_DIR.glob("status_*.json"):
         try:
@@ -143,7 +166,7 @@ def get_status_data():
         except Exception:
             item["duration_seconds"] = None
 
-    return {"active": active, "history": history}
+    return {"active": active, "history": history, "disk": get_disk_usage()}
 
 
 async def broadcaster():
@@ -204,16 +227,57 @@ DASHBOARD_HTML = """\
   .badge.failed { background: #3d1a1a; color: #f85149; }
   #footer { font-size: 0.75rem; color: #484f58; margin-top: 24px; display: flex; gap: 16px; }
   #conn-status { color: #f0883e; }
+  .disk-bar { margin-bottom: 24px; }
+  .disk-info { display: flex; justify-content: space-between; font-size: 0.82rem; color: #8b949e; margin-bottom: 6px; }
+  .disk-info .disk-path { color: #c9d1d9; }
+  .disk-bar-bg { background: #21262d; border-radius: 4px; height: 10px; overflow: hidden; }
+  .disk-bar-fill { height: 100%; border-radius: 4px; background: #238636; transition: width 0.5s ease; }
+  .disk-bar-fill.warn { background: #d29922; }
+  .disk-bar-fill.danger { background: #f85149; }
+  .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
+  .card-header .card-title { margin-bottom: 0; flex: 1; min-width: 0; }
+  .btn-eject { background: #21262d; border: 1px solid #30363d; color: #8b949e; font-size: 0.75rem; font-weight: 600; padding: 4px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; margin-left: 10px; flex-shrink: 0; transition: background 0.15s, color 0.15s, border-color 0.15s; }
+  .btn-eject:hover { background: #3d1a1a; border-color: #f85149; color: #f85149; }
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay.active { display: flex; }
+  .modal { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px 28px 24px; max-width: 380px; width: 90%; }
+  .modal h3 { font-size: 1rem; font-weight: 600; color: #e6edf3; margin-bottom: 8px; }
+  .modal p { font-size: 0.88rem; color: #8b949e; margin-bottom: 20px; line-height: 1.5; }
+  .modal-drive { color: #c9d1d9; font-family: monospace; }
+  .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+  .btn-cancel { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; font-size: 0.85rem; font-weight: 600; padding: 7px 16px; border-radius: 6px; cursor: pointer; }
+  .btn-cancel:hover { background: #30363d; }
+  .btn-confirm-eject { background: #3d1a1a; border: 1px solid #f85149; color: #f85149; font-size: 0.85rem; font-weight: 600; padding: 7px 16px; border-radius: 6px; cursor: pointer; }
+  .btn-confirm-eject:hover { background: #f85149; color: #fff; }
 </style>
 </head>
 <body>
 <h1><span class="dot"></span> MakeMKV AutoRip Dashboard</h1>
+<div id="disk-section"></div>
 <h2>Active Rips</h2>
 <div id="active-section"><div class="no-active">Connecting...</div></div>
 <h2>Recent Completions</h2>
 <div id="history-section"></div>
 <div id="footer"><span id="last-updated"></span><span id="conn-status"></span></div>
+
+<div class="modal-overlay" id="eject-modal">
+  <div class="modal">
+    <h3>Eject Drive?</h3>
+    <p>Are you sure you want to eject <span class="modal-drive" id="modal-drive-name"></span>?</p>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="modal-cancel">Cancel</button>
+      <button class="btn-confirm-eject" id="modal-confirm">Eject</button>
+    </div>
+  </div>
+</div>
 <script>
+function fmt_bytes(b) {
+  if (b == null) return '\u2014';
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
+  return b.toFixed(1) + '\u00a0' + units[i];
+}
 function fmt_dur(s) {
   if (s == null) return '\u2014';
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -226,38 +290,75 @@ function fmt_time(iso) {
   if (!iso) return '\u2014';
   try { return new Date(iso).toLocaleString(); } catch(e) { return iso; }
 }
-function bar(pct, cls) {
-  const w = pct != null ? Math.min(100, Math.max(0, pct)) : 0;
-  return '<div class="progress-bar-bg"><div class="progress-bar-fill ' + cls + '" style="width:' + w + '%"></div></div>';
-}
 function esc(s) {
   return s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') : '';
 }
 
+function driveKey(drive) {
+  return (drive || '').replace(/[^a-zA-Z0-9]/g, '_');
+}
+function buildCard(r) {
+  const key = driveKey(r.drive);
+  const tw = r.title_pct != null ? Math.min(100, Math.max(0, r.title_pct)) : 0;
+  const ow = r.overall_pct != null ? Math.min(100, Math.max(0, r.overall_pct)) : 0;
+  const div = document.createElement('div');
+  div.className = 'card';
+  div.dataset.drive = key;
+  div.innerHTML =
+    '<div class="card-header">'
+    + '<div class="card-title" data-f="title">' + esc(r.title || 'Unknown') + '</div>'
+    + (r.drive ? '<button class="btn-eject" onclick="confirmEject(\\'' + esc(r.drive) + '\\')">Eject</button>' : '')
+    + '</div>'
+    + '<div class="card-drive">' + esc(r.drive || '') + '</div>'
+    + '<div class="title-counter" data-f="tc"' + (r.title_current == null ? ' style="display:none"' : '') + '>'
+    + (r.title_current != null ? 'Title ' + r.title_current + (r.title_total != null ? ' of ' + r.title_total : '') : '')
+    + '</div>'
+    + '<div class="progress-label"><span>Title progress</span><span data-f="tp">' + fmt_pct(r.title_pct) + '</span></div>'
+    + '<div class="progress-bar-bg"><div class="progress-bar-fill" data-f="tb" style="width:' + tw + '%"></div></div>'
+    + '<div class="progress-label"><span>Overall progress</span><span data-f="op">' + fmt_pct(r.overall_pct) + '</span></div>'
+    + '<div class="progress-bar-bg"><div class="progress-bar-fill overall" data-f="ob" style="width:' + ow + '%"></div></div>'
+    + '<div class="op-label" data-f="cop-label"' + (r.current_op ? '' : ' style="display:none"') + '>Current operation</div>'
+    + '<div class="op-value" data-f="cop"' + (r.current_op ? '' : ' style="display:none"') + '>' + esc(r.current_op || '') + '</div>'
+    + '<div class="op-label" data-f="oop-label"' + (r.overall_op ? '' : ' style="display:none"') + '>Overall</div>'
+    + '<div class="op-value" data-f="oop"' + (r.overall_op ? '' : ' style="display:none"') + '>' + esc(r.overall_op || '') + '</div>'
+    + '<div class="elapsed" data-f="el">Elapsed: ' + fmt_dur(r.elapsed_seconds) + '</div>';
+  return div;
+}
+function updateCard(card, r) {
+  const f = name => card.querySelector('[data-f="' + name + '"]');
+  const tw = r.title_pct != null ? Math.min(100, Math.max(0, r.title_pct)) : 0;
+  const ow = r.overall_pct != null ? Math.min(100, Math.max(0, r.overall_pct)) : 0;
+  f('title').textContent = r.title || 'Unknown';
+  const tc = f('tc');
+  if (r.title_current != null) { tc.textContent = 'Title ' + r.title_current + (r.title_total != null ? ' of ' + r.title_total : ''); tc.style.display = ''; }
+  else { tc.style.display = 'none'; }
+  f('tp').textContent = fmt_pct(r.title_pct);
+  f('tb').style.width = tw + '%';
+  f('op').textContent = fmt_pct(r.overall_pct);
+  f('ob').style.width = ow + '%';
+  const copLabel = f('cop-label'), cop = f('cop');
+  if (r.current_op) { cop.textContent = r.current_op; cop.style.display = ''; copLabel.style.display = ''; }
+  else { cop.style.display = 'none'; copLabel.style.display = 'none'; }
+  const oopLabel = f('oop-label'), oop = f('oop');
+  if (r.overall_op) { oop.textContent = r.overall_op; oop.style.display = ''; oopLabel.style.display = ''; }
+  else { oop.style.display = 'none'; oopLabel.style.display = 'none'; }
+  f('el').textContent = 'Elapsed: ' + fmt_dur(r.elapsed_seconds);
+}
+function renderActive(active, container) {
+  if (!active || active.length === 0) { container.innerHTML = '<div class="no-active">No active rips.</div>'; return; }
+  let wrap = container.querySelector('.cards');
+  if (!wrap) { container.innerHTML = ''; wrap = document.createElement('div'); wrap.className = 'cards'; container.appendChild(wrap); }
+  const newKeys = new Set(active.map(r => driveKey(r.drive)));
+  for (const card of [...wrap.children]) { if (!newKeys.has(card.dataset.drive)) wrap.removeChild(card); }
+  for (const r of active) {
+    const existing = wrap.querySelector('[data-drive="' + driveKey(r.drive) + '"]');
+    if (existing) { updateCard(existing, r); } else { wrap.appendChild(buildCard(r)); }
+  }
+}
+
 function updateUI(data) {
   const ac = document.getElementById('active-section');
-  if (!data.active || data.active.length === 0) {
-    ac.innerHTML = '<div class="no-active">No active rips.</div>';
-  } else {
-    ac.innerHTML = '<div class="cards">' + data.active.map(r => {
-      const tp = fmt_pct(r.title_pct), op = fmt_pct(r.overall_pct);
-      const titleLine = r.title_current != null
-        ? '<div class="title-counter">Title ' + r.title_current + (r.title_total != null ? ' of ' + r.title_total : '') + '</div>'
-        : '';
-      return '<div class="card">'
-        + '<div class="card-title">' + esc(r.title || 'Unknown') + '</div>'
-        + '<div class="card-drive">' + esc(r.drive || '') + '</div>'
-        + titleLine
-        + '<div class="progress-label"><span>Title progress</span><span>' + tp + '</span></div>'
-        + bar(r.title_pct, '')
-        + '<div class="progress-label"><span>Overall progress</span><span>' + op + '</span></div>'
-        + bar(r.overall_pct, 'overall')
-        + (r.current_op ? '<div class="op-label">Current operation</div><div class="op-value">' + esc(r.current_op) + '</div>' : '')
-        + (r.overall_op ? '<div class="op-label">Overall</div><div class="op-value">' + esc(r.overall_op) + '</div>' : '')
-        + '<div class="elapsed">Elapsed: ' + fmt_dur(r.elapsed_seconds) + '</div>'
-        + '</div>';
-    }).join('') + '</div>';
-  }
+  renderActive(data.active, ac);
 
   const hs = document.getElementById('history-section');
   if (!data.history || data.history.length === 0) {
@@ -276,8 +377,62 @@ function updateUI(data) {
       + '</tbody></table>';
   }
 
+  const ds = document.getElementById('disk-section');
+  if (data.disk) {
+    const d = data.disk;
+    const pct = d.pct_used;
+    const cls = pct >= 90 ? 'danger' : pct >= 75 ? 'warn' : '';
+    ds.innerHTML = '<div class="disk-bar">'
+      + '<div class="disk-info"><span class="disk-path">' + esc(d.path) + '</span>'
+      + '<span>' + fmt_bytes(d.used) + ' used of ' + fmt_bytes(d.total) + ' &mdash; ' + fmt_bytes(d.free) + ' free (' + pct + '% used)</span></div>'
+      + '<div class="disk-bar-bg"><div class="disk-bar-fill ' + cls + '" style="width:' + Math.min(100, pct) + '%"></div></div>'
+      + '</div>';
+  } else {
+    ds.innerHTML = '';
+  }
+
   document.getElementById('last-updated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 }
+
+let pendingEjectDrive = null;
+const ejectModal = document.getElementById('eject-modal');
+const modalDriveName = document.getElementById('modal-drive-name');
+
+function confirmEject(drive) {
+  pendingEjectDrive = drive;
+  modalDriveName.textContent = drive;
+  ejectModal.classList.add('active');
+}
+
+document.getElementById('modal-cancel').addEventListener('click', () => {
+  ejectModal.classList.remove('active');
+  pendingEjectDrive = null;
+});
+
+ejectModal.addEventListener('click', (e) => {
+  if (e.target === ejectModal) {
+    ejectModal.classList.remove('active');
+    pendingEjectDrive = null;
+  }
+});
+
+document.getElementById('modal-confirm').addEventListener('click', async () => {
+  if (!pendingEjectDrive) return;
+  const drive = pendingEjectDrive;
+  ejectModal.classList.remove('active');
+  pendingEjectDrive = null;
+  try {
+    const resp = await fetch('/api/eject', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({drive})
+    });
+    const data = await resp.json();
+    if (!data.ok) console.error('Eject failed:', data.error);
+  } catch(e) {
+    console.error('Eject request failed:', e);
+  }
+});
 
 let ws, reconnTimer;
 function connect() {
@@ -321,6 +476,22 @@ async def ws_endpoint(websocket: WebSocket):
         pass
     finally:
         connected.discard(websocket)
+
+
+@app.post("/api/eject")
+async def api_eject(request: Request):
+    body = await request.json()
+    drive = body.get("drive", "")
+    # Only allow /dev/sr*, /dev/dvd*, /dev/cdrom* to prevent injection
+    if not re.fullmatch(r"/dev/(sr\d+|dvd\w*|cdrom\w*)", drive):
+        return JSONResponse({"ok": False, "error": "Invalid drive path"}, status_code=400)
+    try:
+        subprocess.run(["eject", drive], check=True, timeout=10)
+        return JSONResponse({"ok": True})
+    except subprocess.CalledProcessError as e:
+        return JSONResponse({"ok": False, "error": f"eject failed: {e}"}, status_code=500)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 if __name__ == "__main__":
