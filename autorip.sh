@@ -98,8 +98,48 @@ with open('$STATUSFILE', 'w') as f:
         'progress_file': '${NOWDATE}_${DISKTITLERAW}_progress.log'
     }, f)
 "
-mkdir "$OUTPUTDIR/$DISKTITLE"
-makemkvcon mkv --messages="${SCRIPTROOT}/logs/${NOWDATE}_$DISKTITLERAW.log" --progress="$PROGRESSFILE" --noscan --robot $ARGS disc:"$SOURCEMMKVDRIVE" all "${OUTPUTDIR}/${DISKTITLE}"
+# Probe the disc to detect copy-protection confusion (hundreds of similarly-timed titles).
+# If found, backup+decrypt is far faster and avoids filling the disk with decoy titles.
+echo "[INFO] $SOURCEDRIVE: Scanning disc for title information..."
+DISC_INFO_FILE=$(mktemp)
+makemkvcon --robot --minlength=0 info disc:"$SOURCEMMKVDRIVE" > "$DISC_INFO_FILE" 2>/dev/null
+DISC_TITLE_COUNT=$(grep '^TCOUNT:' "$DISC_INFO_FILE" | grep -o '[0-9]*' | tail -1)
+
+USE_BACKUP=false
+if [[ "$DISC_TITLE_COUNT" =~ ^[0-9]+$ ]] && [ "$DISC_TITLE_COUNT" -gt 100 ]; then
+	DURATIONS_SIMILAR=$(python3 -c "
+import sys, statistics, re
+with open(sys.argv[1]) as f:
+    lines = f.readlines()
+durations = []
+for line in lines:
+    m = re.match(r'TINFO:\d+,9,\d+,\"(\d+:\d+:\d+)\"', line)
+    if m:
+        h, mi, s = map(int, m.group(1).split(':'))
+        secs = h*3600 + mi*60 + s
+        if secs > 0:
+            durations.append(secs)
+if len(durations) < 2:
+    print('no')
+    sys.exit()
+mean = statistics.mean(durations)
+cv = statistics.stdev(durations) / mean if mean > 0 else 999
+print('yes' if cv < 0.1 else 'no')
+" "$DISC_INFO_FILE")
+	if [ "$DURATIONS_SIMILAR" = "yes" ]; then
+		USE_BACKUP=true
+		echo "[INFO] $SOURCEDRIVE: Detected $DISC_TITLE_COUNT similar-length titles — using backup mode with decryption to avoid copy-protection confusion"
+	fi
+fi
+rm -f "$DISC_INFO_FILE"
+
+if [ "$USE_BACKUP" = "true" ]; then
+	# backup mode creates the destination directory itself; don't pre-create it
+	makemkvcon backup --decrypt --messages="${SCRIPTROOT}/logs/${NOWDATE}_$DISKTITLERAW.log" --progress="$PROGRESSFILE" --noscan --robot $ARGS disc:"$SOURCEMMKVDRIVE" "${OUTPUTDIR}/${DISKTITLE}"
+else
+	mkdir "$OUTPUTDIR/$DISKTITLE"
+	makemkvcon mkv --messages="${SCRIPTROOT}/logs/${NOWDATE}_$DISKTITLERAW.log" --progress="$PROGRESSFILE" --noscan --robot $ARGS disc:"$SOURCEMMKVDRIVE" all "${OUTPUTDIR}/${DISKTITLE}"
+fi
 RIPRESULT=$?
 STATUS="complete"
 [ $RIPRESULT -gt 1 ] && STATUS="failed"
