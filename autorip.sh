@@ -106,7 +106,7 @@ makemkvcon --robot --minlength=0 info disc:"$SOURCEMMKVDRIVE" > "$DISC_INFO_FILE
 DISC_TITLE_COUNT=$(grep '^TCOUNT:' "$DISC_INFO_FILE" | grep -o '[0-9]*' | tail -1)
 
 USE_BACKUP=false
-if [[ "$DISC_TITLE_COUNT" =~ ^[0-9]+$ ]] && [ "$DISC_TITLE_COUNT" -gt 100 ]; then
+if [[ "$DISC_TITLE_COUNT" =~ ^[0-9]+$ ]] && [ "$DISC_TITLE_COUNT" -gt 15 ]; then
 	DURATIONS_SIMILAR=$(python3 -c "
 import sys, statistics, re
 with open(sys.argv[1]) as f:
@@ -122,8 +122,17 @@ for line in lines:
 if len(durations) < 2:
     print('no')
     sys.exit()
-mean = statistics.mean(durations)
-cv = statistics.stdev(durations) / mean if mean > 0 else 999
+# Only consider titles >= 60 minutes so short extras and TV episodes (which
+# top out around 45-50 min) don't inflate variance and mask a cluster of
+# identically-timed decoy titles. Copy-protection decoys are always planted
+# at the main movie runtime (90+ min); TV discs with many similar-length
+# episodes will have all titles below this threshold and use mkv mode.
+filtered = [d for d in durations if d >= 3600]
+if len(filtered) < 10:
+    print('no')
+    sys.exit()
+mean = statistics.mean(filtered)
+cv = statistics.stdev(filtered) / mean if mean > 0 else 999
 print('yes' if cv < 0.1 else 'no')
 " "$DISC_INFO_FILE")
 	if [ "$DURATIONS_SIMILAR" = "yes" ]; then
